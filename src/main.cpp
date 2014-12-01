@@ -22,6 +22,7 @@ static void load_keys(fs::path dir);
 
 // 这个才是 ROOT CA 签发证书所用到的私钥
 std::shared_ptr<EVP_PKEY> rootca_privatekey;
+std::shared_ptr<X509> rootca_selfcert;
 
 // 这个是 ca 作为 avim 客户端和 avrouter 沟通的时候所用的 key 和 cert
 // av地址必须是 ca@avplayer.org
@@ -92,7 +93,9 @@ int main(int argc, char **argv)
 
 	// TODO 打开配置文件, 读取需要连入的 router 列表
 
-	csr_handle csr_handler(io_service);
+	csr_handle csr_handler(io_service, dbpath, rootca_privatekey, rootca_selfcert);
+
+	csr_handler.set_root_pkey(rootca_privatekey);
 
 	// 现在只是链接到 一个, 就是 router@avplayer.org
 	boost::asio::spawn(io_service, avrouter_connect_routine);
@@ -102,8 +105,11 @@ int main(int argc, char **argv)
 	{
 		for(;;)
 		{
-			std::string target, data;
-			avcore.async_recvfrom(target, data, yield_context);
+			std::string sender, data;
+			avcore.async_recvfrom(sender, data, yield_context);
+
+			if (sender != "router@avplayer.org")
+				continue;
 
 			if (!is_control_message(data))
 				continue;
@@ -114,14 +120,10 @@ int main(int argc, char **argv)
 			if (!av_control_message)
 				continue;
 
-			if (av_control_message->GetTypeName() == "proto.ca.csr_push")
+			if (av_control_message->GetTypeName() == "proto.ca.csr_request")
 			{
-				csr_handler.process_csr_push(av_control_message.get(), avcore, yield_context);
+				csr_handler.process_csr_request(av_control_message.get(), avcore, yield_context);
 			}
-
-			// TODO 签发
-
-			// TODO 返回!
 		}
 
 	});
@@ -148,10 +150,10 @@ void load_keys(fs::path dir)
 		exit(1);
 	}
 
-	std::shared_ptr<BIO> bio_cert {BIO_new_file((dir / "avim.cert").string().c_str(), "r") , BIO_free};
+	std::shared_ptr<BIO> bio_cert {BIO_new_file((dir / "avim.crt").string().c_str(), "r") , BIO_free};
 	if (!bio_cert)
 	{
-		std::cerr << "无法打开 avim.cert" << std::endl;
+		std::cerr << "无法打开 avim.crt" << std::endl;
 		exit(1);
 	}
 	std::shared_ptr<BIO> bio_root_cert_key {BIO_new_file((dir / "root.key").string().c_str(), "r") , BIO_free};
@@ -161,6 +163,12 @@ void load_keys(fs::path dir)
 		exit(1);
 	}
 
+	std::shared_ptr<BIO> bio_root_cert_file {BIO_new_file((dir / "root.crt").string().c_str(), "r") , BIO_free};
+	if (!bio_root_cert_key)
+	{
+		std::cerr << "无法打开 root.crt" << std::endl;
+		exit(1);
+	}
 	if (bio_cert && bio_key)
 	{
 		auto _c_rsa_key = PEM_read_bio_RSAPrivateKey(bio_key.get(), nullptr, [](char * buf, int size, int rwflag, void * parent)->int
@@ -177,7 +185,10 @@ void load_keys(fs::path dir)
 
 		ca_avkey.reset(_c_rsa_key, RSA_free);
 		ca_avcert.reset(PEM_read_bio_X509(bio_cert.get(), NULL, NULL, NULL), X509_free);
+	}
 
+	if (bio_root_cert_key && bio_root_cert_file)
+	{
 		auto _c_root_key = PEM_read_bio_PrivateKey(bio_root_cert_key.get(), nullptr, [](char * buf, int size, int rwflag, void * parent)->int
 		{
 			// 提示用户输入密码
@@ -191,5 +202,6 @@ void load_keys(fs::path dir)
 		}, (void*) 0);
 
 		rootca_privatekey.reset(_c_root_key, EVP_PKEY_free);
+		rootca_selfcert.reset(PEM_read_bio_X509(bio_root_cert_file.get(), NULL, NULL, NULL), X509_free);
 	}
 }
