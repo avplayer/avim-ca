@@ -9,6 +9,7 @@
 #include <openssl/evp.h>
 
 #include "ca_service.hpp"
+#include "csr_handle.hpp"
 
 namespace po = boost::program_options;
 namespace asio = boost::asio;
@@ -57,6 +58,11 @@ int main(int argc, char **argv)
 		terminator_signal.add(SIGQUIT);
 #endif // defined(SIGQUIT)
 		terminator_signal.async_wait(std::bind(&terminator, boost::ref(io_pool), boost::ref(serv)));
+
+		csr_handle csr_handler(io_pool);
+
+		serv.add_message_process_moudle("proto.ca.csr_push",
+			boost::bind(&csr_handle::process_csr_push, &csr_handler, _1, _2, _3));
 
 		serv.start();
 
