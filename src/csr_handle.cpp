@@ -9,13 +9,13 @@ csr_handle::~csr_handle()
 {
 }
 
-csr_handle::csr_handle(io_service_pool& ios)
-	: m_io_service_poll(ios)
+csr_handle::csr_handle(boost::asio::io_service& io)
+	: m_io_service(io)
 {
 }
 
 // 在这里处理 csr 推送. avrouter 将 CSR 文件推送过来, CA 呢, 就是要处理后返回 CERT
-bool csr_handle::process_csr_push(google::protobuf::Message* msg, connection_ptr con, connection_manager& mgr)
+bool csr_handle::process_csr_push(google::protobuf::Message* msg, avkernel& avcore, boost::asio::yield_context yield_context)
 {
 	bool csr_integrity_pass = false;
 	auto csr_push_msg = dynamic_cast<proto::ca::csr_push*>(msg);
@@ -43,7 +43,7 @@ bool csr_handle::process_csr_push(google::protobuf::Message* msg, connection_ptr
 				if ( l > 1)
 				{
 					std::string rsa_pk12((char*)out, l);
-					char sha1[20];
+					unsigned char sha1[20];
 					SHA1(out, l, sha1);
 
 					csr_integrity_pass = (0 == memcmp(sha1, csr_push_msg->fingerprint().c_str(), 20));
@@ -57,21 +57,19 @@ bool csr_handle::process_csr_push(google::protobuf::Message* msg, connection_ptr
 
 	if (!csr_integrity_pass)
 	{
-		// 不鸟烂货, 暴力关闭连接
-		con->stop();
+		// 不鸟烂货
 		return false;
 	}
 
 	// 立即回复 push ok
 
 	proto::ca::push_ok push_ok;
-	push_ok.add_fingerprints()->assign(csr_push_msg->has_fingerprint());
+	push_ok.add_fingerprints()->assign(csr_push_msg->fingerprint());
 
-	con->write_msg(encode(push_ok));
 
 	// 开始签出证书!
 
-	
+
 
 	return true;
 }

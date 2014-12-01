@@ -39,4 +39,6 @@ include_directories(${OPENSSL_INCLUDE_DIR})
 include_directories(${CMAKE_THREAD_LIBS_INIT})
 
 add_subdirectory(proto)
+add_subdirectory(libavim)
+
 add_subdirectory(src)
