@@ -3,8 +3,10 @@
 #include <openssl/pem.h>
 #include <openssl/x509.h>
 #include <openssl/evp.h>
+#include <boost/asio.hpp>
+#include <boost/asio/spawn.hpp>
 
-#include <avproto.hpp>
+#include "ca.pb.h"
 
 class csr_handle
 {
@@ -13,7 +15,7 @@ public:
 	~csr_handle();
 
 public:
-	bool process_csr_request(std::string sender, google::protobuf::Message* msg, avkernel& avcore, boost::asio::yield_context yield_context);
+	bool process_csr_request(google::protobuf::Message* msg, boost::asio::ip::tcp::socket&, boost::asio::yield_context yield_context);
 	void set_root_pkey(const std::shared_ptr<EVP_PKEY>& rootca_privatekey)
 	{
 		m_rootca_pkey = rootca_privatekey;

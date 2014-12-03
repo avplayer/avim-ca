@@ -5,70 +5,95 @@
 #include <boost/program_options.hpp>
 #include <boost/filesystem.hpp>
 #include <boost/asio.hpp>
+#include <exception>
+#include <system_error>
 #include <openssl/pem.h>
 #include <openssl/x509.h>
 #include <openssl/evp.h>
 
-#include "avproto.hpp"
+#include "ca.pb.h"
 #include "csr_handle.hpp"
-
-#include <avproto/serialization.hpp>
+#include "serialization.hpp"
 
 namespace po = boost::program_options;
 namespace asio = boost::asio;
 namespace fs = boost::filesystem;
 
-static void load_keys(fs::path dir);
+static void load_keys(fs::path pem_cert, fs::path pem_key);
 
 // 这个才是 ROOT CA 签发证书所用到的私钥
 std::shared_ptr<EVP_PKEY> rootca_privatekey;
 std::shared_ptr<X509> rootca_selfcert;
 
-// 这个是 ca 作为 avim 客户端和 avrouter 沟通的时候所用的 key 和 cert
-// av地址必须是 ca@avplayer.org
-// 利用 avim 网络和 avrouter 沟通, 因此需要一个 av 地址, 这个 key 是 av地址的 key
-std::shared_ptr<RSA> ca_avkey;
-std::shared_ptr<X509> ca_avcert;
-
 boost::asio::io_service io_service;
-avkernel avcore(io_service);
 
-std::shared_ptr<avjackif> avconnect;
-
-static void avrouter_connect_routine(boost::asio::yield_context yield_context)
+template<typename AsyncStream>
+static inline google::protobuf::Message*
+async_read_protobuf_message(AsyncStream &_sock, boost::asio::yield_context yield_context)
 {
-	boost::system::error_code ec;
-	avconnect.reset(new avjackif(io_service));
-	avconnect->signal_notify_remove.connect([]()
+	std::uint32_t l;
+	boost::asio::async_read(_sock, boost::asio::buffer(&l, sizeof(l)), boost::asio::transfer_exactly(4), yield_context);
+	auto hostl = htonl(l);
+	std::string  buf;
+
+	buf.resize(hostl + 4);
+	memcpy(&buf[0], &l, 4);
+	hostl = boost::asio::async_read(_sock, boost::asio::buffer(&buf[4], hostl),
+		boost::asio::transfer_exactly(hostl), yield_context);
+
+	return av_proto::decode(buf);
+}
+
+
+static void ca_main(std::string avrouter_host, std::string avrouter_port, csr_handle& csr_handler, boost::asio::yield_context yield_context)
+{
+	try
 	{
-		boost::asio::spawn(io_service, avrouter_connect_routine);
-	});
+		boost::asio::ip::tcp::socket socket(io_service);
+		// 首先连接到 avrouter
+		boost::asio::ip::tcp::resolver resolver(io_service);
+		boost::asio::ip::tcp::resolver::query query(avrouter_host, avrouter_port);
 
-	avconnect->set_pki(ca_avkey, ca_avcert);
-	auto _debug_host = getenv("AVIM_HOST");
+		auto endpointit = resolver.async_resolve(query, yield_context);
 
-	bool ret = avconnect->async_connect(_debug_host?_debug_host:"avim.avplayer.org", "24950", yield_context);
-	ret = ret && avconnect->async_handshake(yield_context);
+		boost::asio::async_connect(socket, endpointit, yield_context);
 
-	std::string me_addr = av_address_to_string(*avconnect->if_address());
+		// TODO 发送 ca_announce
 
-	ret &&	avcore.add_interface(avconnect) &&
-	avcore.add_route(".+@.+", "ca@avplayer.org", avconnect->get_ifname(), 100);
+		{
+			proto::ca::ca_announce ca_announce;
+			boost::asio::async_write(socket, boost::asio::buffer(av_proto::encode(ca_announce)), yield_context);
+		}
 
-	// 发条消息 让avrouter 刷新路由表
-	if (ret)
+		for(;;) // 主循环
+		{
+			std::unique_ptr<google::protobuf::Message> msg;
+			msg.reset(async_read_protobuf_message(socket, yield_context));
+
+			// TODO 读取 csr_request 消息
+			if (msg)
+				csr_handler.process_csr_request(msg.get(), socket, yield_context);
+			else throw std::system_error();
+		}
+
+	}catch(const std::exception&)
 	{
-		message::message_packet emptypkt;
-		avcore.async_sendto("router@avplayer.org", encode_message(emptypkt), yield_context[ec]);
+		// 链接错误, 重试 ...
+		boost::system::error_code ec;
+		boost::asio::deadline_timer timer(io_service);
+		timer.expires_from_now(boost::posix_time::seconds(20));
+		timer.async_wait(yield_context[ec]);
+		boost::asio::spawn(io_service, std::bind(ca_main, avrouter_host, avrouter_port, std::ref(csr_handler), std::placeholders::_1));
 	}
 }
+
 /*
  * avCA - 管理 CSR 和 CERT 的简单程序.
  */
 int main(int argc, char **argv)
 {
 	fs::path dbpath;
-	fs::path certpath;
+	fs::path pem_key, pem_cert;
 
 
 	OpenSSL_add_all_algorithms();
@@ -77,7 +102,8 @@ int main(int argc, char **argv)
 	desc.add_options()
 		("help,h", "help message")
 		("version", "current avrouter version")
-		("configpath", po::value<fs::path>(&certpath)->default_value("/etc/avimca"), "path to private key and configs")
+		("ca_root_key", po::value<fs::path>(&pem_key)->default_value("/etc/avimca/root.key"), "path to private key")
+		("ca_root_cert", po::value<fs::path>(&pem_cert)->default_value("/etc/avimca/root.cert"), "path to root cert")
 		("certdb", po::value<fs::path>(&dbpath)->default_value("/var/lib/avimca"), "path to crt and csr store")
 		;
 
@@ -91,20 +117,8 @@ int main(int argc, char **argv)
 		return 0;
 	}
 
-	if (!fs::exists(certpath / "routers.txt"))
-	{
-		std::cerr << "no " << (certpath / "routers.txt") << " exites."   << std::endl;
-		return 1;
-	}
-
-	if (!fs::exists(certpath / "routers.txt"))
-	{
-		std::cerr << "no " << (certpath / "routers.txt") << " exites."   << std::endl;
-		return 1;
-	}
-
 	// 载入密钥
-	load_keys(certpath);
+	load_keys(pem_key, pem_cert);
 
 	// TODO 打开配置文件, 读取需要连入的 router 列表
 
@@ -112,36 +126,13 @@ int main(int argc, char **argv)
 
 	csr_handler.set_root_pkey(rootca_privatekey);
 
-	// 现在只是链接到 一个, 就是 router@avplayer.org
-	boost::asio::spawn(io_service, avrouter_connect_routine);
+	std::string avrouter_host = "avim.avplayer.org";
+	std::string avrouter_port = "24950";
 
-	// 主循环开始
-	boost::asio::spawn(io_service,[&csr_handler](boost::asio::yield_context yield_context)
-	{
-		for(;;)
-		{
-			std::string sender, data;
-			avcore.async_recvfrom(sender, data, yield_context);
+	// 主程序开始
+	boost::asio::spawn(io_service, std::bind(ca_main, avrouter_host, avrouter_port, std::ref(csr_handler), std::placeholders::_1));
 
-			if (sender != "router@avplayer.org" || sender != "test-route@avplayer.org" )
-				continue;
 
-			if (!is_control_message(data))
-				continue;
-
-			// 接到一个 csr 了
-			// 尝试解码为 protobuf
-			std::shared_ptr<google::protobuf::Message> av_control_message(av_proto::decode(data.substr(1)));
-			if (!av_control_message)
-				continue;
-
-			if (av_control_message->GetTypeName() == "proto.ca.csr_request")
-			{
-				csr_handler.process_csr_request(sender, av_control_message.get(), avcore, yield_context);
-			}
-		}
-
-	});
 	// Ctrl+c异步处理退出.
 	boost::asio::signal_set terminator_signal(io_service);
 	terminator_signal.add(SIGINT);
@@ -155,51 +146,20 @@ int main(int argc, char **argv)
 	return 0;
 }
 
-void load_keys(fs::path dir)
+void load_keys(boost::filesystem::path pem_cert, boost::filesystem::path pem_key)
 {
-	std::shared_ptr<BIO> bio_key {BIO_new_file((dir / "avim.key").string().c_str(), "r") , BIO_free};
-
-	if (!bio_key)
-	{
-		std::cerr << "无法打开 avim.key" << std::endl;
-		exit(1);
-	}
-
-	std::shared_ptr<BIO> bio_cert {BIO_new_file((dir / "avim.crt").string().c_str(), "r") , BIO_free};
-	if (!bio_cert)
-	{
-		std::cerr << "无法打开 avim.crt" << std::endl;
-		exit(1);
-	}
-	std::shared_ptr<BIO> bio_root_cert_key {BIO_new_file((dir / "root.key").string().c_str(), "r") , BIO_free};
+	std::shared_ptr<BIO> bio_root_cert_key {BIO_new_file(pem_cert.string().c_str(), "r") , BIO_free};
 	if (!bio_root_cert_key)
 	{
-		std::cerr << "无法打开 root.key" << std::endl;
+		std::cerr << "无法打开 " << pem_cert << std::endl;
 		exit(1);
 	}
 
-	std::shared_ptr<BIO> bio_root_cert_file {BIO_new_file((dir / "root.crt").string().c_str(), "r") , BIO_free};
+	std::shared_ptr<BIO> bio_root_cert_file {BIO_new_file(pem_key.string().c_str(), "r") , BIO_free};
 	if (!bio_root_cert_file)
 	{
-		std::cerr << "无法打开 root.crt" << std::endl;
+		std::cerr << "无法打开" << pem_key << std::endl;
 		exit(1);
-	}
-	if (bio_cert && bio_key)
-	{
-		auto _c_rsa_key = PEM_read_bio_RSAPrivateKey(bio_key.get(), nullptr, [](char * buf, int size, int rwflag, void * parent)->int
-		{
-			// 提示用户输入密码
-			auto text = getpass("输入密码解锁 avim 密钥: ");
-			if (text && strlen(text))
-			{
-				strncpy(buf, text, strlen(text));
-				return strlen(text);
-			}
-			return -1;
-		}, (void*) 0);
-
-		ca_avkey.reset(_c_rsa_key, RSA_free);
-		ca_avcert.reset(PEM_read_bio_X509(bio_cert.get(), NULL, NULL, NULL), X509_free);
 	}
 
 	if (bio_root_cert_key && bio_root_cert_file)
@@ -207,7 +167,7 @@ void load_keys(fs::path dir)
 		auto _c_root_key = PEM_read_bio_PrivateKey(bio_root_cert_key.get(), nullptr, [](char * buf, int size, int rwflag, void * parent)->int
 		{
 			// 提示用户输入密码
-			auto text = getpass("再次输入密码解锁 root 密钥: ");
+			auto text = getpass("输入密码解锁 ca 密钥: ");
 			if (text && strlen(text))
 			{
 				strncpy(buf, text, strlen(text));

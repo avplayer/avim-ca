@@ -4,7 +4,8 @@
 #include <ca.pb.h>
 
 #include <openssl/x509.h>
-#include <avproto/easyssl.hpp>
+#include "easyssl.hpp"
+#include "serialization.hpp"
 
 csr_handle::~csr_handle()
 {
@@ -20,7 +21,7 @@ csr_handle::csr_handle(boost::asio::io_service& io, const boost::filesystem::pat
 }
 
 // 在这里处理 csr 推送. avrouter 将 CSR 文件推送过来, CA 呢, 就是要处理后返回 CERT
-bool csr_handle::process_csr_request(std::string sender, google::protobuf::Message* msg, avkernel& avcore, boost::asio::yield_context yield_context)
+bool csr_handle::process_csr_request(google::protobuf::Message* msg, boost::asio::ip::tcp::socket& socket, boost::asio::yield_context yield_context)
 {
 	bool csr_integrity_pass = false;
 	auto csr_request_msg = dynamic_cast<proto::ca::csr_request*>(msg);
@@ -76,10 +77,8 @@ bool csr_handle::process_csr_request(std::string sender, google::protobuf::Messa
 
 	csr_result.set_cert(X509_to_string(signed_cert.get()));
 
-	std::string avpayload;
-	avpayload = encode_control_message(std::string(), csr_result);
-	avcore.async_sendto("test-route@avplayer.org", avpayload, yield_context);
 
+	boost::asio::async_write(socket, boost::asio::buffer(av_proto::encode(csr_result)), yield_context);
 	return true;
 }
 
