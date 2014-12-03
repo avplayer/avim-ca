@@ -39,7 +39,8 @@ static void avrouter_connect_routine(boost::asio::yield_context yield_context)
 {
 	avconnect.reset(new avjackif(io_service));
 	avconnect->set_pki(ca_avkey, ca_avcert);
-	avconnect->async_handshake("avim.avplayer.org", "24950", yield_context);
+	avconnect->async_connect("avim.avplayer.org", "24950", yield_context);
+	avconnect->async_handshake(yield_context);
 	avconnect->signal_notify_remove.connect([]()
 	{
 		boost::asio::spawn(io_service, avrouter_connect_routine);

@@ -146,7 +146,6 @@ std::shared_ptr<X509> csr_handle::csr_sign(std::shared_ptr<X509_REQ> csr, std::s
 	// CERT 签出来了, 写入文件
 	std::string	x509_cert = X509_to_string(x509.get());
 
-
 	if (!boost::filesystem::exists(m_dbpath / certfilename.substr(4)))
 	{
 		boost::filesystem::create_directories(m_dbpath / certfilename.substr(4));
