@@ -168,7 +168,7 @@ void load_keys(fs::path dir)
 	}
 
 	std::shared_ptr<BIO> bio_root_cert_file {BIO_new_file((dir / "root.crt").string().c_str(), "r") , BIO_free};
-	if (!bio_root_cert_key)
+	if (!bio_root_cert_file)
 	{
 		std::cerr << "无法打开 root.crt" << std::endl;
 		exit(1);
