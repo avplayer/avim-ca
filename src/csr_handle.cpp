@@ -4,6 +4,7 @@
 #include <ca.pb.h>
 
 #include <openssl/x509.h>
+#include <avproto/easyssl.hpp>
 
 csr_handle::~csr_handle()
 {
@@ -19,7 +20,7 @@ csr_handle::csr_handle(boost::asio::io_service& io, const boost::filesystem::pat
 }
 
 // 在这里处理 csr 推送. avrouter 将 CSR 文件推送过来, CA 呢, 就是要处理后返回 CERT
-bool csr_handle::process_csr_request(google::protobuf::Message* msg, avkernel& avcore, boost::asio::yield_context yield_context)
+bool csr_handle::process_csr_request(std::string sender, google::protobuf::Message* msg, avkernel& avcore, boost::asio::yield_context yield_context)
 {
 	bool csr_integrity_pass = false;
 	auto csr_request_msg = dynamic_cast<proto::ca::csr_request*>(msg);
@@ -66,15 +67,18 @@ bool csr_handle::process_csr_request(google::protobuf::Message* msg, avkernel& a
 		return false;
 	}
 
-	// 立即回复 push ok
-
-	proto::ca::push_ok push_ok;
-	push_ok.add_fingerprints()->assign(csr_request_msg->fingerprint());
-
 	// 开始签出证书!
-	csr_sign(csr, evp_pubkey);
+	auto signed_cert = csr_sign(csr, evp_pubkey);
 
 	// TODO 向 avrouter 返回 cert !
+
+	proto::ca::csr_result csr_result;
+
+	csr_result.set_cert(X509_to_string(signed_cert.get()));
+
+	std::string avpayload;
+	avpayload = encode_control_message(std::string(), csr_result);
+	avcore.async_sendto("test-route@avplayer.org", avpayload, yield_context);
 
 	return true;
 }
@@ -84,6 +88,17 @@ static inline int X509_NAME_add_entry_by_NID(X509_NAME *subj, int nid, std::stri
 	return X509_NAME_add_entry_by_NID(subj, nid, MBSTRING_UTF8, (unsigned char*) value.data(), -1, -1 , 0);
 }
 
+static std::string bytes_to_hex(unsigned char bytes[], int length)
+{
+	char hex_table[] = { '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'A', 'B', 'C', 'D', 'E', 'F'};
+	std::string ret;
+	std::for_each(bytes, bytes + length, [hex_table, &ret](unsigned char b)
+	{
+		ret.append(1, hex_table[(b& 0xF0)>>4]);
+		ret.append(1, hex_table[(b& 0xF)]);
+	});
+	return ret;
+}
 
 std::shared_ptr<X509> csr_handle::csr_sign(std::shared_ptr<X509_REQ> csr, std::shared_ptr<EVP_PKEY> user_pkey)
 {
@@ -98,8 +113,17 @@ std::shared_ptr<X509> csr_handle::csr_sign(std::shared_ptr<X509_REQ> csr, std::s
 	else
 		return false;
 
-	// TODO 计算 av地址 sha256 校验
+	// 计算 av地址 sha256 校验
+	unsigned char md[32];
+	SHA256((const unsigned char*)common_name.data(), common_name.length(), md);
+	std::string certfilename = bytes_to_hex(md, sizeof(md));
+
 	// 然后到 db 里找找看有没有重复
+	if (boost::filesystem::exists((m_dbpath / certfilename.substr(4) / certfilename).string().c_str()))
+	{
+		// FIXME, 最好查看下文件日期, 过期的可以重签
+		return false;
+	}
 
 	// 来, 把 CERT 签出来
 	std::shared_ptr<X509> x509(X509_new(), X509_free);
@@ -120,18 +144,20 @@ std::shared_ptr<X509> csr_handle::csr_sign(std::shared_ptr<X509_REQ> csr, std::s
 	X509_sign(x509.get(), m_rootca_pkey.get(), EVP_sha256());
 
 	// CERT 签出来了, 写入文件
-	std::string	x509_cert;
+	std::string	x509_cert = X509_to_string(x509.get());
 
-	unsigned char * der_cert_out = NULL;
-	auto der_cert_size = i2d_X509(x509.get(), &der_cert_out);
-	x509_cert.assign((const char*)der_cert_out, der_cert_size);
-	CRYPTO_free(der_cert_out);
 
-	unsigned char md[32];
+	if (!boost::filesystem::exists(m_dbpath / certfilename.substr(4)))
+	{
+		boost::filesystem::create_directories(m_dbpath / certfilename.substr(4));
+	}
 
-	SHA256((const unsigned char*)x509_cert.data(), x509_cert.length(), md);
+	std::shared_ptr<BIO> certfile(
+		BIO_new_file((m_dbpath / certfilename.substr(4) / certfilename).string().c_str(), "w"),
+		BIO_free
+	);
 
-	// TODO 以 tohex(md) 作为文件名存入文件系统
+	PEM_write_bio_X509(certfile.get(), x509.get());
 	return x509;
 }
 

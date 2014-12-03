@@ -108,7 +108,7 @@ int main(int argc, char **argv)
 			std::string sender, data;
 			avcore.async_recvfrom(sender, data, yield_context);
 
-			if (sender != "router@avplayer.org")
+			if (sender != "router@avplayer.org" || sender != "test-route@avplayer.org" )
 				continue;
 
 			if (!is_control_message(data))
@@ -122,7 +122,7 @@ int main(int argc, char **argv)
 
 			if (av_control_message->GetTypeName() == "proto.ca.csr_request")
 			{
-				csr_handler.process_csr_request(av_control_message.get(), avcore, yield_context);
+				csr_handler.process_csr_request(sender, av_control_message.get(), avcore, yield_context);
 			}
 		}
 
