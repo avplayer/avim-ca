@@ -71,15 +71,20 @@ bool csr_handle::process_csr_request(google::protobuf::Message* msg, boost::asio
 	// 开始签出证书!
 	auto signed_cert = csr_sign(csr, evp_pubkey);
 
-	// TODO 向 avrouter 返回 cert !
+	if (signed_cert)
+	{
+		// TODO 向 avrouter 返回 cert !
 
-	proto::ca::csr_result csr_result;
+		proto::ca::csr_result csr_result;
 
-	csr_result.set_cert(X509_to_string(signed_cert.get()));
+		csr_result.set_cert(X509_to_string(signed_cert.get()));
 
+		boost::asio::async_write(socket, boost::asio::buffer(av_proto::encode(csr_result)), yield_context);
 
-	boost::asio::async_write(socket, boost::asio::buffer(av_proto::encode(csr_result)), yield_context);
-	return true;
+		return true;
+	}
+
+	return false;
 }
 
 static inline int X509_NAME_add_entry_by_NID(X509_NAME *subj, int nid, std::string value)

@@ -44,7 +44,6 @@ async_read_protobuf_message(AsyncStream &_sock, boost::asio::yield_context yield
 	return av_proto::decode(buf);
 }
 
-
 static void ca_main(std::string avrouter_host, std::string avrouter_port, csr_handle& csr_handler, boost::asio::yield_context yield_context)
 {
 	try
@@ -62,6 +61,7 @@ static void ca_main(std::string avrouter_host, std::string avrouter_port, csr_ha
 
 		{
 			proto::ca::ca_announce ca_announce;
+			ca_announce.set_ca_name("avplayer ROOT ca");
 			boost::asio::async_write(socket, boost::asio::buffer(av_proto::encode(ca_announce)), yield_context);
 		}
 
