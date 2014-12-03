@@ -37,19 +37,30 @@ std::shared_ptr<avjackif> avconnect;
 
 static void avrouter_connect_routine(boost::asio::yield_context yield_context)
 {
+	boost::system::error_code ec;
 	avconnect.reset(new avjackif(io_service));
-	avconnect->set_pki(ca_avkey, ca_avcert);
-	auto _debug_host = getenv("AVIM_HOST");
-
-	bool ret = avconnect->async_connect(_debug_host?_debug_host:"avim.avplayer.org", "24950", yield_context);
-
-	avconnect->async_handshake(yield_context);
 	avconnect->signal_notify_remove.connect([]()
 	{
 		boost::asio::spawn(io_service, avrouter_connect_routine);
 	});
-	avcore.add_interface(avconnect);
-	avcore.add_route("router@avplayer.org", "ca@avplayer.org", avconnect->get_ifname(), 100);
+
+	avconnect->set_pki(ca_avkey, ca_avcert);
+	auto _debug_host = getenv("AVIM_HOST");
+
+	bool ret = avconnect->async_connect(_debug_host?_debug_host:"avim.avplayer.org", "24950", yield_context);
+	ret = ret && avconnect->async_handshake(yield_context);
+
+	std::string me_addr = av_address_to_string(*avconnect->if_address());
+
+	ret &&	avcore.add_interface(avconnect) &&
+	avcore.add_route(".+@.+", "ca@avplayer.org", avconnect->get_ifname(), 100);
+
+	// 发条消息 让avrouter 刷新路由表
+	if (ret)
+	{
+		message::message_packet emptypkt;
+		avcore.async_sendto("router@avplayer.org", encode_message(emptypkt), yield_context[ec]);
+	}
 }
 /*
  * avCA - 管理 CSR 和 CERT 的简单程序.
